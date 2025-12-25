@@ -1,4 +1,4 @@
-/**
+v/**
  * Upload Routes
  * Handle music file uploads to Cloudflare R2
  */
@@ -7,7 +7,6 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const mm = require('music-metadata');
 const { v4: uuidv4 } = require('uuid');
 const { query } = require('../config/database');
@@ -40,15 +39,28 @@ const upload = multer({
   }
 });
 
-// Configure R2 client
-const r2Client = new S3Client({
-  region: 'auto',
-  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
-  },
-});
+// Configure R2 client (lazy initialization to ensure env vars are loaded)
+let r2Client = null;
+
+const getR2Client = () => {
+  if (!r2Client) {
+    console.log('Initializing R2 client...');
+    console.log('R2_ACCOUNT_ID:', process.env.R2_ACCOUNT_ID ? 'SET' : 'NOT SET');
+    console.log('R2_ACCESS_KEY_ID:', process.env.R2_ACCESS_KEY_ID ? 'SET' : 'NOT SET');
+    console.log('R2_SECRET_ACCESS_KEY:', process.env.R2_SECRET_ACCESS_KEY ? 'SET' : 'NOT SET');
+    console.log('R2_BUCKET_NAME:', process.env.R2_BUCKET_NAME ? 'SET' : 'NOT SET');
+    
+    r2Client = new S3Client({
+      region: 'auto',
+      endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: process.env.R2_ACCESS_KEY_ID,
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+      },
+    });
+  }
+  return r2Client;
+};
 
 // Get file extension from mimetype
 const getExtension = (mimetype) => {
@@ -83,9 +95,9 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
     );
 
     const user = userResult.rows[0];
-    const newStorageUsed = user.storage_used + req.file.size;
+    const newStorageUsed = parseInt(user.storage_used) + req.file.size;
 
-    if (newStorageUsed > user.storage_limit) {
+    if (newStorageUsed > parseInt(user.storage_limit)) {
       return res.status(400).json({
         error: 'Storage limit exceeded',
         storage_used: user.storage_used,
@@ -123,6 +135,7 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
     const fileName = `${req.user.id}/${fileId}.${extension}`;
 
     // Upload to R2
+    console.log(`Uploading to R2: ${fileName}`);
     const uploadCommand = new PutObjectCommand({
       Bucket: process.env.R2_BUCKET_NAME,
       Key: fileName,
@@ -130,7 +143,13 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
       ContentType: req.file.mimetype,
     });
 
-    await r2Client.send(uploadCommand);
+    try {
+      await getR2Client().send(uploadCommand);
+      console.log('R2 upload successful');
+    } catch (r2Error) {
+      console.error('R2 upload error:', r2Error);
+      return res.status(500).json({ error: 'Failed to upload to storage: ' + r2Error.message });
+    }
 
     const fileUrl = `${process.env.R2_PUBLIC_URL}/${fileName}`;
 
@@ -190,10 +209,10 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
 
     const user = userResult.rows[0];
 
-    if (user.storage_used + totalSize > user.storage_limit) {
+    if (parseInt(user.storage_used) + totalSize > parseInt(user.storage_limit)) {
       return res.status(400).json({
         error: 'Storage limit would be exceeded',
-        storage_available: user.storage_limit - user.storage_used,
+        storage_available: parseInt(user.storage_limit) - parseInt(user.storage_used),
         upload_size: totalSize
       });
     }
@@ -233,7 +252,7 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
         const extension = getExtension(file.mimetype);
         const fileName = `${req.user.id}/${fileId}.${extension}`;
 
-        await r2Client.send(new PutObjectCommand({
+        await getR2Client().send(new PutObjectCommand({
           Bucket: process.env.R2_BUCKET_NAME,
           Key: fileName,
           Body: file.buffer,
@@ -264,6 +283,7 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
         results.successful.push(songResult.rows[0]);
 
       } catch (fileError) {
+        console.error('File upload error:', fileError);
         results.failed.push({
           filename: file.originalname,
           error: fileError.message
@@ -307,10 +327,10 @@ router.get('/storage', authenticateToken, async (req, res) => {
     res.json({
       storage_used: user.storage_used,
       storage_limit: user.storage_limit,
-      storage_used_gb: (user.storage_used / 1073741824).toFixed(2),
-      storage_limit_gb: (user.storage_limit / 1073741824).toFixed(0),
-      storage_available: user.storage_limit - user.storage_used,
-      percentage_used: ((user.storage_used / user.storage_limit) * 100).toFixed(1),
+      storage_used_gb: (parseInt(user.storage_used) / 1073741824).toFixed(2),
+      storage_limit_gb: (parseInt(user.storage_limit) / 1073741824).toFixed(0),
+      storage_available: parseInt(user.storage_limit) - parseInt(user.storage_used),
+      percentage_used: ((parseInt(user.storage_used) / parseInt(user.storage_limit)) * 100).toFixed(1),
       plan: user.plan
     });
 
