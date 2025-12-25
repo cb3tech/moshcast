@@ -1,4 +1,4 @@
-v/**
+/**
  * Upload Routes
  * Handle music file uploads to Cloudflare R2
  */
