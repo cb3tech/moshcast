@@ -1,12 +1,14 @@
 /**
  * Upload Routes
  * Handle music file uploads to Cloudflare R2
+ * NOW WITH ALBUM ART EXTRACTION
  */
 
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const mm = require('music-metadata');
 const { v4: uuidv4 } = require('uuid');
 const { query } = require('../config/database');
@@ -39,28 +41,15 @@ const upload = multer({
   }
 });
 
-// Configure R2 client (lazy initialization to ensure env vars are loaded)
-let r2Client = null;
-
-const getR2Client = () => {
-  if (!r2Client) {
-    console.log('Initializing R2 client...');
-    console.log('R2_ACCOUNT_ID:', process.env.R2_ACCOUNT_ID ? 'SET' : 'NOT SET');
-    console.log('R2_ACCESS_KEY_ID:', process.env.R2_ACCESS_KEY_ID ? 'SET' : 'NOT SET');
-    console.log('R2_SECRET_ACCESS_KEY:', process.env.R2_SECRET_ACCESS_KEY ? 'SET' : 'NOT SET');
-    console.log('R2_BUCKET_NAME:', process.env.R2_BUCKET_NAME ? 'SET' : 'NOT SET');
-    
-    r2Client = new S3Client({
-      region: 'auto',
-      endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-      credentials: {
-        accessKeyId: process.env.R2_ACCESS_KEY_ID,
-        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
-      },
-    });
-  }
-  return r2Client;
-};
+// Configure R2 client
+const r2Client = new S3Client({
+  region: 'auto',
+  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
+});
 
 // Get file extension from mimetype
 const getExtension = (mimetype) => {
@@ -77,6 +66,57 @@ const getExtension = (mimetype) => {
   };
   return map[mimetype] || 'mp3';
 };
+
+// Get image extension from mimetype
+const getImageExtension = (mimetype) => {
+  const map = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+  };
+  return map[mimetype] || 'jpg';
+};
+
+/**
+ * Extract and upload album artwork from audio file
+ * Returns the public URL of the artwork, or null if none found
+ */
+async function extractAndUploadArtwork(parsed, userId, fileId) {
+  try {
+    // Check if there's embedded artwork
+    const pictures = parsed.common.picture;
+    if (!pictures || pictures.length === 0) {
+      return null;
+    }
+
+    // Get the first picture (usually the front cover)
+    const picture = pictures[0];
+    const imageData = picture.data;
+    const imageMimeType = picture.format || 'image/jpeg';
+    const imageExtension = getImageExtension(imageMimeType);
+
+    // Generate artwork filename
+    const artworkFileName = `${userId}/artwork/${fileId}.${imageExtension}`;
+
+    // Upload artwork to R2
+    const uploadCommand = new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET_NAME,
+      Key: artworkFileName,
+      Body: imageData,
+      ContentType: imageMimeType,
+    });
+
+    await r2Client.send(uploadCommand);
+
+    // Return public URL
+    return `${process.env.R2_PUBLIC_URL}/${artworkFileName}`;
+
+  } catch (error) {
+    console.error('Artwork extraction error:', error.message);
+    return null; // Fail silently - artwork is optional
+  }
+}
 
 /**
  * POST /api/upload
@@ -95,9 +135,9 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
     );
 
     const user = userResult.rows[0];
-    const newStorageUsed = parseInt(user.storage_used) + req.file.size;
+    const newStorageUsed = user.storage_used + req.file.size;
 
-    if (newStorageUsed > parseInt(user.storage_limit)) {
+    if (newStorageUsed > user.storage_limit) {
       return res.status(400).json({
         error: 'Storage limit exceeded',
         storage_used: user.storage_used,
@@ -106,10 +146,16 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
       });
     }
 
+    // Generate unique file ID (used for both audio and artwork)
+    const fileId = uuidv4();
+
     // Extract metadata from audio file
     let metadata = {};
+    let artworkUrl = null;
+    
     try {
       const parsed = await mm.parseBuffer(req.file.buffer, req.file.mimetype);
+      
       metadata = {
         title: parsed.common.title || req.file.originalname.replace(/\.[^/.]+$/, ''),
         artist: parsed.common.artist || 'Unknown Artist',
@@ -119,6 +165,10 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
         genre: parsed.common.genre?.[0] || null,
         duration: Math.round(parsed.format.duration) || 0,
       };
+
+      // Extract and upload artwork
+      artworkUrl = await extractAndUploadArtwork(parsed, req.user.id, fileId);
+      
     } catch (metaError) {
       console.error('Metadata extraction error:', metaError.message);
       metadata = {
@@ -129,13 +179,11 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
       };
     }
 
-    // Generate unique filename
-    const fileId = uuidv4();
+    // Generate audio filename
     const extension = getExtension(req.file.mimetype);
     const fileName = `${req.user.id}/${fileId}.${extension}`;
 
-    // Upload to R2
-    console.log(`Uploading to R2: ${fileName}`);
+    // Upload audio to R2
     const uploadCommand = new PutObjectCommand({
       Bucket: process.env.R2_BUCKET_NAME,
       Key: fileName,
@@ -143,20 +191,14 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
       ContentType: req.file.mimetype,
     });
 
-    try {
-      await getR2Client().send(uploadCommand);
-      console.log('R2 upload successful');
-    } catch (r2Error) {
-      console.error('R2 upload error:', r2Error);
-      return res.status(500).json({ error: 'Failed to upload to storage: ' + r2Error.message });
-    }
+    await r2Client.send(uploadCommand);
 
     const fileUrl = `${process.env.R2_PUBLIC_URL}/${fileName}`;
 
-    // Save to database
+    // Save to database (now includes artwork_url)
     const songResult = await query(`
-      INSERT INTO songs (user_id, title, artist, album, track_number, duration, year, genre, file_url, file_size, format)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      INSERT INTO songs (user_id, title, artist, album, track_number, duration, year, genre, file_url, file_size, format, artwork_url)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *
     `, [
       req.user.id,
@@ -169,7 +211,8 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
       metadata.genre,
       fileUrl,
       req.file.size,
-      extension
+      extension,
+      artworkUrl  // NEW: Save artwork URL
     ]);
 
     // Update user storage
@@ -209,10 +252,10 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
 
     const user = userResult.rows[0];
 
-    if (parseInt(user.storage_used) + totalSize > parseInt(user.storage_limit)) {
+    if (user.storage_used + totalSize > user.storage_limit) {
       return res.status(400).json({
         error: 'Storage limit would be exceeded',
-        storage_available: parseInt(user.storage_limit) - parseInt(user.storage_used),
+        storage_available: user.storage_limit - user.storage_used,
         upload_size: totalSize
       });
     }
@@ -225,8 +268,12 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
     // Process each file
     for (const file of req.files) {
       try {
+        const fileId = uuidv4();
+        
         // Extract metadata
         let metadata = {};
+        let artworkUrl = null;
+        
         try {
           const parsed = await mm.parseBuffer(file.buffer, file.mimetype);
           metadata = {
@@ -238,6 +285,10 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
             genre: parsed.common.genre?.[0] || null,
             duration: Math.round(parsed.format.duration) || 0,
           };
+          
+          // Extract and upload artwork
+          artworkUrl = await extractAndUploadArtwork(parsed, req.user.id, fileId);
+          
         } catch {
           metadata = {
             title: file.originalname.replace(/\.[^/.]+$/, ''),
@@ -247,12 +298,11 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
           };
         }
 
-        // Upload to R2
-        const fileId = uuidv4();
+        // Upload audio to R2
         const extension = getExtension(file.mimetype);
         const fileName = `${req.user.id}/${fileId}.${extension}`;
 
-        await getR2Client().send(new PutObjectCommand({
+        await r2Client.send(new PutObjectCommand({
           Bucket: process.env.R2_BUCKET_NAME,
           Key: fileName,
           Body: file.buffer,
@@ -263,8 +313,8 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
 
         // Save to database
         const songResult = await query(`
-          INSERT INTO songs (user_id, title, artist, album, track_number, duration, year, genre, file_url, file_size, format)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          INSERT INTO songs (user_id, title, artist, album, track_number, duration, year, genre, file_url, file_size, format, artwork_url)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
           RETURNING *
         `, [
           req.user.id,
@@ -277,13 +327,13 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
           metadata.genre,
           fileUrl,
           file.size,
-          extension
+          extension,
+          artworkUrl
         ]);
 
         results.successful.push(songResult.rows[0]);
 
       } catch (fileError) {
-        console.error('File upload error:', fileError);
         results.failed.push({
           filename: file.originalname,
           error: fileError.message
@@ -327,10 +377,10 @@ router.get('/storage', authenticateToken, async (req, res) => {
     res.json({
       storage_used: user.storage_used,
       storage_limit: user.storage_limit,
-      storage_used_gb: (parseInt(user.storage_used) / 1073741824).toFixed(2),
-      storage_limit_gb: (parseInt(user.storage_limit) / 1073741824).toFixed(0),
-      storage_available: parseInt(user.storage_limit) - parseInt(user.storage_used),
-      percentage_used: ((parseInt(user.storage_used) / parseInt(user.storage_limit)) * 100).toFixed(1),
+      storage_used_gb: (user.storage_used / 1073741824).toFixed(2),
+      storage_limit_gb: (user.storage_limit / 1073741824).toFixed(0),
+      storage_available: user.storage_limit - user.storage_used,
+      percentage_used: ((user.storage_used / user.storage_limit) * 100).toFixed(1),
       plan: user.plan
     });
 
