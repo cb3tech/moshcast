@@ -1,6 +1,6 @@
 {
   "name": "moshcast-backend",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Moshcast - Your Music. Your Library. Everywhere.",
   "main": "src/index.js",
   "scripts": {
@@ -19,12 +19,13 @@
     "uuid": "^9.0.1",
     "@aws-sdk/client-s3": "^3.450.0",
     "@aws-sdk/s3-request-presigner": "^3.450.0",
-    "music-metadata": "^8.1.4"
+    "music-metadata": "^8.1.4",
+    "socket.io": "^4.7.2"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
   },
-  "keywords": ["music", "streaming", "library"],
+  "keywords": ["music", "streaming", "library", "live"],
   "author": "Chris",
   "license": "MIT"
 }
