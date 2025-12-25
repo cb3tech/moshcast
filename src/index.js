@@ -15,7 +15,6 @@ const authRoutes = require('./routes/auth');
 const libraryRoutes = require('./routes/library');
 const playlistRoutes = require('./routes/playlists');
 const uploadRoutes = require('./routes/upload');
-const liveRoutes = require('./routes/live');
 
 // Initialize Express
 const app = express();
@@ -214,7 +213,7 @@ app.get('/', (req, res) => {
     version: '1.2.0',
     status: 'running',
     message: 'Your Music. Your Library. Everywhere.',
-    features: ['auth', 'library', 'playlists', 'upload', 'live-streaming', 'websocket'],
+    features: ['auth', 'library', 'playlists', 'upload', 'websocket-live'],
     activeSessions: activeSessions.size
   });
 });
@@ -224,7 +223,6 @@ app.use('/api/auth', authRoutes);
 app.use('/api/library', libraryRoutes);
 app.use('/api/playlists', playlistRoutes);
 app.use('/api/upload', uploadRoutes);
-app.use('/api/live', liveRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
