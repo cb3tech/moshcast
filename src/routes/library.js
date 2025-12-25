@@ -112,7 +112,7 @@ router.get('/recent', authenticateToken, async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 20, 100);
 
     const result = await query(`
-      SELECT id, title, artist, album, duration, artwork_url, created_at
+      SELECT id, title, artist, album, duration, artwork_url, file_url, created_at
       FROM songs
       WHERE user_id = $1
       ORDER BY created_at DESC
