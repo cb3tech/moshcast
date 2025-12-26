@@ -1,7 +1,7 @@
 /**
  * Moshcast Backend - Entry Point
  * Your Music. Your Library. Everywhere.
- * v1.3.0 - Socket.IO for Go Live + Friends
+ * v1.3.0 - Socket.IO for Go Live + Friends + Stream Discovery
  */
 
 require('dotenv').config();
@@ -49,7 +49,7 @@ app.get('/', (req, res) => {
     version: '1.3.0',
     status: 'running',
     message: 'Your Music. Your Library. Everywhere.',
-    features: ['library', 'playlists', 'upload', 'settings', 'rss-feeds', 'golive', 'friends']
+    features: ['library', 'playlists', 'upload', 'settings', 'rss-feeds', 'golive', 'friends', 'stream-discovery']
   });
 });
 
@@ -68,6 +68,32 @@ app.use('/api/friends', friendsRoutes);
 
 // Active streaming sessions: { username: { hostSocketId, song, isPlaying, position, startedAt, listeners: Set } }
 const sessions = {};
+
+// ============================================
+// ACTIVE STREAMS API ENDPOINT
+// Returns list of all live streams for discovery
+// ============================================
+app.get('/api/streams/active', (req, res) => {
+  const activeStreams = [];
+  
+  for (const [username, session] of Object.entries(sessions)) {
+    activeStreams.push({
+      host: username,
+      song: session.song ? {
+        title: session.song.title || 'Unknown',
+        artist: session.song.artist || 'Unknown'
+      } : null,
+      listenerCount: session.listeners ? session.listeners.size : 0,
+      startedAt: session.startedAt
+    });
+  }
+  
+  res.json({ streams: activeStreams });
+});
+
+// ============================================
+// Socket.IO Event Handlers
+// ============================================
 
 io.on('connection', (socket) => {
   console.log(`🔌 Socket connected: ${socket.id}`);
