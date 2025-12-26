@@ -67,56 +67,6 @@ const getExtension = (mimetype) => {
 };
 
 /**
- * Fetch album artwork from iTunes Search API
- * Tries: artist + album first, then artist + title as fallback
- * Returns 600x600 image URL or null
- */
-const fetchAlbumArtwork = async (artist, album, title) => {
-  // Skip if no useful metadata
-  if (!artist || artist === 'Unknown Artist') {
-    return null;
-  }
-
-  const searchItunes = async (searchTerm) => {
-    try {
-      const encoded = encodeURIComponent(searchTerm);
-      const url = `https://itunes.apple.com/search?term=${encoded}&media=music&entity=album&limit=1`;
-      
-      const response = await fetch(url);
-      if (!response.ok) return null;
-      
-      const data = await response.json();
-      
-      if (data.results && data.results.length > 0) {
-        // Get artwork URL and upgrade to 600x600
-        const artworkUrl = data.results[0].artworkUrl100;
-        if (artworkUrl) {
-          return artworkUrl.replace('100x100bb', '600x600bb');
-        }
-      }
-      return null;
-    } catch (err) {
-      console.error('iTunes search error:', err.message);
-      return null;
-    }
-  };
-
-  // Try 1: Artist + Album
-  if (album && album !== 'Unknown Album') {
-    const artworkUrl = await searchItunes(`${artist} ${album}`);
-    if (artworkUrl) return artworkUrl;
-  }
-
-  // Try 2: Artist + Title (fallback)
-  if (title) {
-    const artworkUrl = await searchItunes(`${artist} ${title}`);
-    if (artworkUrl) return artworkUrl;
-  }
-
-  return null;
-};
-
-/**
  * POST /api/upload
  * Upload music file
  */
@@ -133,21 +83,21 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
     );
 
     const user = userResult.rows[0];
-    const newStorageUsed = user.storage_used + req.file.size;
+    const storageUsed = parseInt(user.storage_used) || 0;
+    const storageLimit = parseInt(user.storage_limit) || 0;
+    const newStorageUsed = storageUsed + req.file.size;
 
-    if (newStorageUsed > user.storage_limit) {
+    if (newStorageUsed > storageLimit) {
       return res.status(400).json({
         error: 'Storage limit exceeded',
-        storage_used: user.storage_used,
-        storage_limit: user.storage_limit,
+        storage_used: storageUsed,
+        storage_limit: storageLimit,
         file_size: req.file.size
       });
     }
 
     // Extract metadata from audio file
     let metadata = {};
-    let embeddedArtwork = null;
-    
     try {
       const parsed = await mm.parseBuffer(req.file.buffer, req.file.mimetype);
       metadata = {
@@ -159,11 +109,6 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
         genre: parsed.common.genre?.[0] || null,
         duration: Math.round(parsed.format.duration) || 0,
       };
-      
-      // Check for embedded artwork
-      if (parsed.common.picture && parsed.common.picture.length > 0) {
-        embeddedArtwork = true; // Has embedded art, we'd need to extract/upload to use it
-      }
     } catch (metaError) {
       console.error('Metadata extraction error:', metaError.message);
       metadata = {
@@ -172,12 +117,6 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
         album: 'Unknown Album',
         duration: 0,
       };
-    }
-
-    // Fetch album artwork from iTunes (if no embedded artwork)
-    let artworkUrl = null;
-    if (!embeddedArtwork) {
-      artworkUrl = await fetchAlbumArtwork(metadata.artist, metadata.album, metadata.title);
     }
 
     // Generate unique filename
@@ -197,10 +136,10 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
 
     const fileUrl = `${process.env.R2_PUBLIC_URL}/${fileName}`;
 
-    // Save to database (now includes artwork_url)
+    // Save to database
     const songResult = await query(`
-      INSERT INTO songs (user_id, title, artist, album, track_number, duration, year, genre, file_url, file_size, format, artwork_url)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      INSERT INTO songs (user_id, title, artist, album, track_number, duration, year, genre, file_url, file_size, format)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING *
     `, [
       req.user.id,
@@ -213,8 +152,7 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
       metadata.genre,
       fileUrl,
       req.file.size,
-      extension,
-      artworkUrl
+      extension
     ]);
 
     // Update user storage
@@ -253,11 +191,13 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
     );
 
     const user = userResult.rows[0];
+    const storageUsed = parseInt(user.storage_used) || 0;
+    const storageLimit = parseInt(user.storage_limit) || 0;
 
-    if (user.storage_used + totalSize > user.storage_limit) {
+    if (storageUsed + totalSize > storageLimit) {
       return res.status(400).json({
         error: 'Storage limit would be exceeded',
-        storage_available: user.storage_limit - user.storage_used,
+        storage_available: storageLimit - storageUsed,
         upload_size: totalSize
       });
     }
@@ -272,8 +212,6 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
       try {
         // Extract metadata
         let metadata = {};
-        let embeddedArtwork = null;
-        
         try {
           const parsed = await mm.parseBuffer(file.buffer, file.mimetype);
           metadata = {
@@ -285,10 +223,6 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
             genre: parsed.common.genre?.[0] || null,
             duration: Math.round(parsed.format.duration) || 0,
           };
-          
-          if (parsed.common.picture && parsed.common.picture.length > 0) {
-            embeddedArtwork = true;
-          }
         } catch {
           metadata = {
             title: file.originalname.replace(/\.[^/.]+$/, ''),
@@ -296,12 +230,6 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
             album: 'Unknown Album',
             duration: 0,
           };
-        }
-
-        // Fetch album artwork from iTunes
-        let artworkUrl = null;
-        if (!embeddedArtwork) {
-          artworkUrl = await fetchAlbumArtwork(metadata.artist, metadata.album, metadata.title);
         }
 
         // Upload to R2
@@ -320,8 +248,8 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
 
         // Save to database
         const songResult = await query(`
-          INSERT INTO songs (user_id, title, artist, album, track_number, duration, year, genre, file_url, file_size, format, artwork_url)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          INSERT INTO songs (user_id, title, artist, album, track_number, duration, year, genre, file_url, file_size, format)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
           RETURNING *
         `, [
           req.user.id,
@@ -334,8 +262,7 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
           metadata.genre,
           fileUrl,
           file.size,
-          extension,
-          artworkUrl
+          extension
         ]);
 
         results.successful.push(songResult.rows[0]);
@@ -349,7 +276,7 @@ router.post('/batch', authenticateToken, upload.array('files', 50), async (req, 
     }
 
     // Update user storage (only for successful uploads)
-    const uploadedSize = results.successful.reduce((sum, song) => sum + song.file_size, 0);
+    const uploadedSize = results.successful.reduce((sum, song) => sum + (parseInt(song.file_size) || 0), 0);
     if (uploadedSize > 0) {
       await query(
         'UPDATE users SET storage_used = storage_used + $1 WHERE id = $2',
@@ -380,14 +307,16 @@ router.get('/storage', authenticateToken, async (req, res) => {
     );
 
     const user = result.rows[0];
+    const storageUsed = parseInt(user.storage_used) || 0;
+    const storageLimit = parseInt(user.storage_limit) || 0;
 
     res.json({
-      storage_used: user.storage_used,
-      storage_limit: user.storage_limit,
-      storage_used_gb: (user.storage_used / 1073741824).toFixed(2),
-      storage_limit_gb: (user.storage_limit / 1073741824).toFixed(0),
-      storage_available: user.storage_limit - user.storage_used,
-      percentage_used: ((user.storage_used / user.storage_limit) * 100).toFixed(1),
+      storage_used: storageUsed,
+      storage_limit: storageLimit,
+      storage_used_gb: (storageUsed / 1073741824).toFixed(2),
+      storage_limit_gb: (storageLimit / 1073741824).toFixed(0),
+      storage_available: storageLimit - storageUsed,
+      percentage_used: ((storageUsed / storageLimit) * 100).toFixed(1),
       plan: user.plan
     });
 
