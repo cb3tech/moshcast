@@ -89,6 +89,34 @@ const migrate = async () => {
     `);
     console.log('✅ Play_history table created');
 
+    // Friendships table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS friendships (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        requester_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        addressee_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'declined', 'blocked')),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(requester_id, addressee_id)
+      );
+    `);
+    console.log('✅ Friendships table created');
+
+    // Active sessions table (tracks who is currently live)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS active_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        host_id UUID REFERENCES users(id) ON DELETE CASCADE UNIQUE,
+        title VARCHAR(255),
+        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        listener_count INTEGER DEFAULT 0,
+        current_song_title VARCHAR(255),
+        current_song_artist VARCHAR(255)
+      );
+    `);
+    console.log('✅ Active_sessions table created');
+
     // Create indexes for performance
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_songs_user_id ON songs(user_id);
@@ -98,6 +126,10 @@ const migrate = async () => {
       CREATE INDEX IF NOT EXISTS idx_playlists_share_code ON playlists(share_code);
       CREATE INDEX IF NOT EXISTS idx_playlist_songs_playlist_id ON playlist_songs(playlist_id);
       CREATE INDEX IF NOT EXISTS idx_play_history_user_id ON play_history(user_id);
+      CREATE INDEX IF NOT EXISTS idx_friendships_requester ON friendships(requester_id);
+      CREATE INDEX IF NOT EXISTS idx_friendships_addressee ON friendships(addressee_id);
+      CREATE INDEX IF NOT EXISTS idx_friendships_status ON friendships(status);
+      CREATE INDEX IF NOT EXISTS idx_active_sessions_host ON active_sessions(host_id);
     `);
     console.log('✅ Indexes created');
 
