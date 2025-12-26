@@ -269,6 +269,86 @@ router.post('/:id/songs', authenticateToken, async (req, res) => {
 });
 
 /**
+ * POST /api/playlists/:id/songs/bulk
+ * Add multiple songs to playlist
+ */
+router.post('/:id/songs/bulk', authenticateToken, async (req, res) => {
+  try {
+    const { songIds } = req.body;
+
+    if (!Array.isArray(songIds) || songIds.length === 0) {
+      return res.status(400).json({ error: 'songIds array is required' });
+    }
+
+    if (songIds.length > 100) {
+      return res.status(400).json({ error: 'Maximum 100 songs per request' });
+    }
+
+    // Verify playlist ownership
+    const playlistCheck = await query(
+      'SELECT id FROM playlists WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.user.id]
+    );
+
+    if (playlistCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Playlist not found' });
+    }
+
+    // Verify song ownership (get only valid songs)
+    const songsCheck = await query(
+      'SELECT id FROM songs WHERE id = ANY($1) AND user_id = $2',
+      [songIds, req.user.id]
+    );
+
+    const validSongIds = songsCheck.rows.map(s => s.id);
+
+    if (validSongIds.length === 0) {
+      return res.status(404).json({ error: 'No valid songs found' });
+    }
+
+    // Get current max position
+    const positionResult = await query(
+      'SELECT COALESCE(MAX(position), 0) as max_position FROM playlist_songs WHERE playlist_id = $1',
+      [req.params.id]
+    );
+
+    let position = positionResult.rows[0].max_position;
+
+    // Add each song
+    let addedCount = 0;
+    for (const songId of validSongIds) {
+      position++;
+      const insertResult = await query(`
+        INSERT INTO playlist_songs (playlist_id, song_id, position)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (playlist_id, song_id) DO NOTHING
+        RETURNING id
+      `, [req.params.id, songId, position]);
+
+      if (insertResult.rowCount > 0) {
+        addedCount++;
+      }
+    }
+
+    // Update playlist timestamp
+    await query(
+      'UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+      [req.params.id]
+    );
+
+    res.json({
+      message: `Added ${addedCount} songs to playlist`,
+      addedCount,
+      skippedCount: validSongIds.length - addedCount
+    });
+
+  } catch (error) {
+    console.error('Bulk add songs to playlist error:', error);
+    res.status(500).json({ error: 'Failed to add songs to playlist' });
+  }
+});
+
+/**
  * DELETE /api/playlists/:id/songs/:songId
  * Remove song from playlist
  */
