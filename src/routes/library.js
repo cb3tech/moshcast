@@ -5,8 +5,28 @@
 
 const express = require('express');
 const router = express.Router();
+const https = require('https');
 const { query } = require('../config/database');
 const { authenticateToken } = require('../middleware/auth');
+
+/**
+ * Helper: Make HTTPS GET request (works in all Node.js versions)
+ */
+function httpsGet(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (e) {
+          reject(new Error('Invalid JSON response'));
+        }
+      });
+    }).on('error', reject);
+  });
+}
 
 /**
  * Fetch album artwork from iTunes API
@@ -28,10 +48,7 @@ async function fetchAlbumArtwork(artist, album, title) {
     
     const searchUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&media=music&entity=album&limit=1`;
     
-    const response = await fetch(searchUrl);
-    if (!response.ok) return null;
-    
-    const data = await response.json();
+    const data = await httpsGet(searchUrl);
     
     if (data.results && data.results.length > 0) {
       // Get artwork URL and upgrade to 600x600
@@ -47,14 +64,11 @@ async function fetchAlbumArtwork(artist, album, title) {
       const fallbackTerm = `${artist || ''} ${title}`.trim();
       const fallbackUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(fallbackTerm)}&media=music&entity=song&limit=1`;
       
-      const fallbackResponse = await fetch(fallbackUrl);
-      if (fallbackResponse.ok) {
-        const fallbackData = await fallbackResponse.json();
-        if (fallbackData.results && fallbackData.results.length > 0) {
-          let artworkUrl = fallbackData.results[0].artworkUrl100;
-          if (artworkUrl) {
-            return artworkUrl.replace('100x100bb', '600x600bb');
-          }
+      const fallbackData = await httpsGet(fallbackUrl);
+      if (fallbackData.results && fallbackData.results.length > 0) {
+        let artworkUrl = fallbackData.results[0].artworkUrl100;
+        if (artworkUrl) {
+          return artworkUrl.replace('100x100bb', '600x600bb');
         }
       }
     }
