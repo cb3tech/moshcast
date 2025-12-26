@@ -311,50 +311,9 @@ router.put('/bulk', authenticateToken, async (req, res) => {
 });
 
 /**
- * POST /api/library/:id/fetch-artwork
- * Re-fetch iTunes artwork for a single song
- */
-router.post('/:id/fetch-artwork', authenticateToken, async (req, res) => {
-  try {
-    // Get song details
-    const songResult = await query(
-      'SELECT id, title, artist, album FROM songs WHERE id = $1 AND user_id = $2',
-      [req.params.id, req.user.id]
-    );
-
-    if (songResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Song not found' });
-    }
-
-    const song = songResult.rows[0];
-
-    // Fetch artwork from iTunes
-    const artworkUrl = await fetchAlbumArtwork(song.artist, song.album, song.title);
-
-    if (!artworkUrl) {
-      return res.status(404).json({ error: 'No artwork found on iTunes' });
-    }
-
-    // Update song with new artwork
-    const updateResult = await query(
-      'UPDATE songs SET artwork_url = $1 WHERE id = $2 RETURNING *',
-      [artworkUrl, song.id]
-    );
-
-    res.json({
-      message: 'Artwork updated',
-      song: updateResult.rows[0]
-    });
-
-  } catch (error) {
-    console.error('Fetch artwork error:', error);
-    res.status(500).json({ error: 'Failed to fetch artwork' });
-  }
-});
-
-/**
  * POST /api/library/bulk/fetch-artwork
  * Re-fetch iTunes artwork for multiple songs
+ * NOTE: This route MUST come before /:id/fetch-artwork to avoid "bulk" being matched as an ID
  */
 router.post('/bulk/fetch-artwork', authenticateToken, async (req, res) => {
   try {
@@ -410,6 +369,48 @@ router.post('/bulk/fetch-artwork', authenticateToken, async (req, res) => {
 
   } catch (error) {
     console.error('Bulk fetch artwork error:', error);
+    res.status(500).json({ error: 'Failed to fetch artwork' });
+  }
+});
+
+/**
+ * POST /api/library/:id/fetch-artwork
+ * Re-fetch iTunes artwork for a single song
+ */
+router.post('/:id/fetch-artwork', authenticateToken, async (req, res) => {
+  try {
+    // Get song details
+    const songResult = await query(
+      'SELECT id, title, artist, album FROM songs WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.user.id]
+    );
+
+    if (songResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Song not found' });
+    }
+
+    const song = songResult.rows[0];
+
+    // Fetch artwork from iTunes
+    const artworkUrl = await fetchAlbumArtwork(song.artist, song.album, song.title);
+
+    if (!artworkUrl) {
+      return res.status(404).json({ error: 'No artwork found on iTunes' });
+    }
+
+    // Update song with new artwork
+    const updateResult = await query(
+      'UPDATE songs SET artwork_url = $1 WHERE id = $2 RETURNING *',
+      [artworkUrl, song.id]
+    );
+
+    res.json({
+      message: 'Artwork updated',
+      song: updateResult.rows[0]
+    });
+
+  } catch (error) {
+    console.error('Fetch artwork error:', error);
     res.status(500).json({ error: 'Failed to fetch artwork' });
   }
 });
