@@ -202,6 +202,46 @@ router.get('/recent', authenticateToken, async (req, res) => {
 });
 
 /**
+ * POST /api/library/sync-storage
+ * Recalculate storage_used from actual songs in database
+ * Fixes any sync issues between storage counter and actual files
+ */
+router.post('/sync-storage', authenticateToken, async (req, res) => {
+  try {
+    // Calculate actual storage from songs
+    const sizeResult = await query(
+      'SELECT COALESCE(SUM(file_size), 0) as total_size FROM songs WHERE user_id = $1',
+      [req.user.id]
+    );
+    const actualSize = parseInt(sizeResult.rows[0].total_size) || 0;
+
+    // Get current stored value
+    const userResult = await query(
+      'SELECT storage_used FROM users WHERE id = $1',
+      [req.user.id]
+    );
+    const storedSize = parseInt(userResult.rows[0].storage_used) || 0;
+
+    // Update to actual value
+    await query(
+      'UPDATE users SET storage_used = $1 WHERE id = $2',
+      [actualSize, req.user.id]
+    );
+
+    res.json({
+      message: 'Storage synced',
+      previous: storedSize,
+      actual: actualSize,
+      difference: storedSize - actualSize
+    });
+
+  } catch (error) {
+    console.error('Storage sync error:', error);
+    res.status(500).json({ error: 'Failed to sync storage' });
+  }
+});
+
+/**
  * DELETE /api/library/bulk
  * Delete multiple songs
  */
