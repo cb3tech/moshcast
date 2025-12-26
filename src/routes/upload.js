@@ -17,7 +17,7 @@ const { authenticateToken } = require('../middleware/auth');
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 100 * 1024 * 1024, // 100MB max per file
+    fileSize: 200 * 1024 * 1024, // 200MB max per file
   },
   fileFilter: (req, file, cb) => {
     const allowedTypes = [
