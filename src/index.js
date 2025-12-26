@@ -26,7 +26,7 @@ const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: ['https://moshcast.com', 'http://localhost:5173', 'http://localhost:3000'],
+    origin: ['https://moshcast.com', 'https://www.moshcast.com', 'http://localhost:5173', 'http://localhost:3000'],
     methods: ['GET', 'POST'],
     credentials: true
   },
@@ -35,7 +35,7 @@ const io = new Server(server, {
 
 // Middleware
 app.use(cors({
-  origin: ['https://moshcast.com', 'http://localhost:5173', 'http://localhost:3000'],
+  origin: ['https://moshcast.com', 'https://www.moshcast.com', 'http://localhost:5173', 'http://localhost:3000'],
   credentials: true
 }));
 app.use(express.json());
