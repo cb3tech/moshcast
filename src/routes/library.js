@@ -1,12 +1,70 @@
 /**
  * Library Routes
- * Songs CRUD operations
+ * Songs CRUD operations + Bulk Management
  */
 
 const express = require('express');
 const router = express.Router();
 const { query } = require('../config/database');
 const { authenticateToken } = require('../middleware/auth');
+
+/**
+ * Fetch album artwork from iTunes API
+ * @param {string} artist 
+ * @param {string} album 
+ * @param {string} title - fallback search term
+ * @returns {string|null} artwork URL or null
+ */
+async function fetchAlbumArtwork(artist, album, title) {
+  try {
+    // Try artist + album first
+    let searchTerm = `${artist || ''} ${album || ''}`.trim();
+    
+    if (!searchTerm) {
+      searchTerm = `${artist || ''} ${title || ''}`.trim();
+    }
+    
+    if (!searchTerm) return null;
+    
+    const searchUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&media=music&entity=album&limit=1`;
+    
+    const response = await fetch(searchUrl);
+    if (!response.ok) return null;
+    
+    const data = await response.json();
+    
+    if (data.results && data.results.length > 0) {
+      // Get artwork URL and upgrade to 600x600
+      let artworkUrl = data.results[0].artworkUrl100;
+      if (artworkUrl) {
+        artworkUrl = artworkUrl.replace('100x100bb', '600x600bb');
+        return artworkUrl;
+      }
+    }
+    
+    // Fallback: try artist + title if album search failed
+    if (album && title) {
+      const fallbackTerm = `${artist || ''} ${title}`.trim();
+      const fallbackUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(fallbackTerm)}&media=music&entity=song&limit=1`;
+      
+      const fallbackResponse = await fetch(fallbackUrl);
+      if (fallbackResponse.ok) {
+        const fallbackData = await fallbackResponse.json();
+        if (fallbackData.results && fallbackData.results.length > 0) {
+          let artworkUrl = fallbackData.results[0].artworkUrl100;
+          if (artworkUrl) {
+            return artworkUrl.replace('100x100bb', '600x600bb');
+          }
+        }
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('iTunes artwork fetch error:', error.message);
+    return null;
+  }
+}
 
 /**
  * GET /api/library
@@ -112,7 +170,7 @@ router.get('/recent', authenticateToken, async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 20, 100);
 
     const result = await query(`
-      SELECT id, title, artist, album, duration, artwork_url, file_url, created_at
+      SELECT id, title, artist, album, duration, artwork_url, created_at
       FROM songs
       WHERE user_id = $1
       ORDER BY created_at DESC
@@ -126,6 +184,219 @@ router.get('/recent', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Recent songs error:', error);
     res.status(500).json({ error: 'Failed to fetch recent songs' });
+  }
+});
+
+/**
+ * DELETE /api/library/bulk
+ * Delete multiple songs
+ */
+router.delete('/bulk', authenticateToken, async (req, res) => {
+  try {
+    const { songIds } = req.body;
+
+    if (!Array.isArray(songIds) || songIds.length === 0) {
+      return res.status(400).json({ error: 'songIds array is required' });
+    }
+
+    if (songIds.length > 100) {
+      return res.status(400).json({ error: 'Maximum 100 songs per request' });
+    }
+
+    // Get total file size for storage update
+    const sizeResult = await query(
+      `SELECT COALESCE(SUM(file_size), 0) as total_size 
+       FROM songs WHERE id = ANY($1) AND user_id = $2`,
+      [songIds, req.user.id]
+    );
+    const totalSize = parseInt(sizeResult.rows[0].total_size) || 0;
+
+    // Delete songs
+    const deleteResult = await query(
+      'DELETE FROM songs WHERE id = ANY($1) AND user_id = $2 RETURNING id',
+      [songIds, req.user.id]
+    );
+
+    // Update user storage
+    if (totalSize > 0) {
+      await query(
+        'UPDATE users SET storage_used = GREATEST(storage_used - $1, 0) WHERE id = $2',
+        [totalSize, req.user.id]
+      );
+    }
+
+    res.json({
+      message: `Deleted ${deleteResult.rowCount} songs`,
+      deletedCount: deleteResult.rowCount,
+      freedBytes: totalSize
+    });
+
+  } catch (error) {
+    console.error('Bulk delete error:', error);
+    res.status(500).json({ error: 'Failed to delete songs' });
+  }
+});
+
+/**
+ * PUT /api/library/bulk
+ * Update metadata for multiple songs
+ */
+router.put('/bulk', authenticateToken, async (req, res) => {
+  try {
+    const { songIds, updates } = req.body;
+
+    if (!Array.isArray(songIds) || songIds.length === 0) {
+      return res.status(400).json({ error: 'songIds array is required' });
+    }
+
+    if (!updates || typeof updates !== 'object') {
+      return res.status(400).json({ error: 'updates object is required' });
+    }
+
+    if (songIds.length > 100) {
+      return res.status(400).json({ error: 'Maximum 100 songs per request' });
+    }
+
+    // Build dynamic update query - only update provided fields
+    const allowedFields = ['title', 'artist', 'album', 'genre', 'year'];
+    const setClauses = [];
+    const values = [songIds, req.user.id];
+    let paramIndex = 3;
+
+    for (const field of allowedFields) {
+      if (updates[field] !== undefined && updates[field] !== '') {
+        setClauses.push(`${field} = $${paramIndex}`);
+        values.push(updates[field]);
+        paramIndex++;
+      }
+    }
+
+    if (setClauses.length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+
+    const updateQuery = `
+      UPDATE songs 
+      SET ${setClauses.join(', ')}
+      WHERE id = ANY($1) AND user_id = $2
+      RETURNING id, title, artist, album, genre, year
+    `;
+
+    const result = await query(updateQuery, values);
+
+    res.json({
+      message: `Updated ${result.rowCount} songs`,
+      updatedCount: result.rowCount,
+      songs: result.rows
+    });
+
+  } catch (error) {
+    console.error('Bulk update error:', error);
+    res.status(500).json({ error: 'Failed to update songs' });
+  }
+});
+
+/**
+ * POST /api/library/:id/fetch-artwork
+ * Re-fetch iTunes artwork for a single song
+ */
+router.post('/:id/fetch-artwork', authenticateToken, async (req, res) => {
+  try {
+    // Get song details
+    const songResult = await query(
+      'SELECT id, title, artist, album FROM songs WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.user.id]
+    );
+
+    if (songResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Song not found' });
+    }
+
+    const song = songResult.rows[0];
+
+    // Fetch artwork from iTunes
+    const artworkUrl = await fetchAlbumArtwork(song.artist, song.album, song.title);
+
+    if (!artworkUrl) {
+      return res.status(404).json({ error: 'No artwork found on iTunes' });
+    }
+
+    // Update song with new artwork
+    const updateResult = await query(
+      'UPDATE songs SET artwork_url = $1 WHERE id = $2 RETURNING *',
+      [artworkUrl, song.id]
+    );
+
+    res.json({
+      message: 'Artwork updated',
+      song: updateResult.rows[0]
+    });
+
+  } catch (error) {
+    console.error('Fetch artwork error:', error);
+    res.status(500).json({ error: 'Failed to fetch artwork' });
+  }
+});
+
+/**
+ * POST /api/library/bulk/fetch-artwork
+ * Re-fetch iTunes artwork for multiple songs
+ */
+router.post('/bulk/fetch-artwork', authenticateToken, async (req, res) => {
+  try {
+    const { songIds } = req.body;
+
+    if (!Array.isArray(songIds) || songIds.length === 0) {
+      return res.status(400).json({ error: 'songIds array is required' });
+    }
+
+    if (songIds.length > 50) {
+      return res.status(400).json({ error: 'Maximum 50 songs per artwork fetch request' });
+    }
+
+    // Get song details
+    const songsResult = await query(
+      'SELECT id, title, artist, album FROM songs WHERE id = ANY($1) AND user_id = $2',
+      [songIds, req.user.id]
+    );
+
+    const results = {
+      updated: [],
+      notFound: [],
+      failed: []
+    };
+
+    // Process each song (with small delay to avoid rate limiting)
+    for (const song of songsResult.rows) {
+      try {
+        const artworkUrl = await fetchAlbumArtwork(song.artist, song.album, song.title);
+
+        if (artworkUrl) {
+          await query(
+            'UPDATE songs SET artwork_url = $1 WHERE id = $2',
+            [artworkUrl, song.id]
+          );
+          results.updated.push({ id: song.id, title: song.title, artwork_url: artworkUrl });
+        } else {
+          results.notFound.push({ id: song.id, title: song.title });
+        }
+
+        // Small delay to avoid iTunes rate limiting
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+      } catch (err) {
+        results.failed.push({ id: song.id, title: song.title, error: err.message });
+      }
+    }
+
+    res.json({
+      message: `Processed ${songsResult.rows.length} songs`,
+      ...results
+    });
+
+  } catch (error) {
+    console.error('Bulk fetch artwork error:', error);
+    res.status(500).json({ error: 'Failed to fetch artwork' });
   }
 });
 
