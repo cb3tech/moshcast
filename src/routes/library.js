@@ -312,7 +312,7 @@ router.put('/bulk', authenticateToken, async (req, res) => {
 
 /**
  * POST /api/library/bulk/parse-filename
- * Extract artist/title from filename and update metadata
+ * Extract artist/title from the current title field (which contains original filename)
  */
 router.post('/bulk/parse-filename', authenticateToken, async (req, res) => {
   try {
@@ -326,9 +326,9 @@ router.post('/bulk/parse-filename', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Maximum 100 songs per request' });
     }
 
-    // Get songs with their file URLs
+    // Get songs - title field contains original filename from upload
     const songsResult = await query(
-      'SELECT id, title, artist, file_url FROM songs WHERE id = ANY($1) AND user_id = $2',
+      'SELECT id, title, artist FROM songs WHERE id = ANY($1) AND user_id = $2',
       [songIds, req.user.id]
     );
 
@@ -340,12 +340,8 @@ router.post('/bulk/parse-filename', authenticateToken, async (req, res) => {
 
     for (const song of songsResult.rows) {
       try {
-        // Extract filename from URL
-        const urlParts = song.file_url.split('/');
-        let filename = decodeURIComponent(urlParts[urlParts.length - 1]);
-        
-        // Remove file extension
-        filename = filename.replace(/\.[^/.]+$/, '');
+        // Use existing title (which is the original filename without extension)
+        let filename = song.title || '';
         
         // Remove common suffixes in parentheses/brackets
         const cleanFilename = filename
@@ -369,9 +365,10 @@ router.post('/bulk/parse-filename', authenticateToken, async (req, res) => {
           newArtist = parts[0].trim();
           newTitle = parts.slice(1).join(' — ').trim();
         }
-        // Pattern 3: Just use filename as title, leave artist
+        // Pattern 3: No separator found - skip, keep original
         else {
-          newTitle = cleanFilename;
+          results.skipped.push({ id: song.id, title: song.title, reason: 'No "Artist - Title" pattern found' });
+          continue;
         }
         
         // Clean up extra whitespace
