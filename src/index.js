@@ -78,8 +78,8 @@ app.get('/api/streams/active', (req, res) => {
   
   for (const [username, session] of Object.entries(sessions)) {
     activeStreams.push({
-      host: username,
-      song: session.song ? {
+      hostUsername: username,
+      currentSong: session.song ? {
         title: session.song.title || 'Unknown',
         artist: session.song.artist || 'Unknown'
       } : null,
@@ -100,6 +100,7 @@ io.on('connection', (socket) => {
 
   // Host starts a stream
   socket.on('host:start', ({ username, song }) => {
+    username = username.toLowerCase(); // Normalize to lowercase
     console.log(`📻 Host starting stream: ${username}`);
     
     // Create or update session
@@ -126,6 +127,7 @@ io.on('connection', (socket) => {
 
   // Host updates stream state (song change, play/pause, seek)
   socket.on('host:update', ({ username, song, isPlaying, position }) => {
+    username = username.toLowerCase(); // Normalize
     if (!sessions[username] || sessions[username].hostSocketId !== socket.id) {
       socket.emit('stream:error', { error: 'Not authorized', code: 'NOT_HOST' });
       return;
@@ -151,6 +153,7 @@ io.on('connection', (socket) => {
 
   // Host ends stream
   socket.on('host:end', ({ username }) => {
+    username = username.toLowerCase(); // Normalize
     if (!sessions[username] || sessions[username].hostSocketId !== socket.id) {
       return;
     }
@@ -167,6 +170,7 @@ io.on('connection', (socket) => {
 
   // Listener joins a stream
   socket.on('listener:join', ({ username, listenerName }) => {
+    username = username.toLowerCase(); // Normalize
     console.log(`👂 Listener joining ${username}: ${listenerName}`);
 
     const session = sessions[username];
@@ -221,6 +225,7 @@ io.on('connection', (socket) => {
 
   // Chat message
   socket.on('chat:send', ({ username, message, senderName }) => {
+    username = username.toLowerCase(); // Normalize
     const session = sessions[username];
     if (!session) return;
 
