@@ -311,6 +311,135 @@ router.put('/bulk', authenticateToken, async (req, res) => {
 });
 
 /**
+ * POST /api/library/bulk/parse-filename
+ * Extract artist/title from filename and update metadata
+ */
+router.post('/bulk/parse-filename', authenticateToken, async (req, res) => {
+  try {
+    const { songIds } = req.body;
+
+    if (!Array.isArray(songIds) || songIds.length === 0) {
+      return res.status(400).json({ error: 'songIds array is required' });
+    }
+
+    if (songIds.length > 100) {
+      return res.status(400).json({ error: 'Maximum 100 songs per request' });
+    }
+
+    // Get songs with their file URLs
+    const songsResult = await query(
+      'SELECT id, title, artist, file_url FROM songs WHERE id = ANY($1) AND user_id = $2',
+      [songIds, req.user.id]
+    );
+
+    const results = {
+      updated: [],
+      skipped: [],
+      failed: []
+    };
+
+    for (const song of songsResult.rows) {
+      try {
+        // Extract filename from URL
+        const urlParts = song.file_url.split('/');
+        let filename = decodeURIComponent(urlParts[urlParts.length - 1]);
+        
+        // Remove file extension
+        filename = filename.replace(/\.[^/.]+$/, '');
+        
+        // Remove common suffixes in parentheses/brackets
+        const cleanFilename = filename
+          .replace(/\s*[\(\[](official|video|audio|music video|lyric|lyrics|hd|hq|4k|1080p|720p|explicit|clean|remaster|remastered)[\)\]]\s*/gi, '')
+          .replace(/\s*[\(\[].*?(official|video|audio).*?[\)\]]\s*/gi, '')
+          .trim();
+        
+        // Try to parse "Artist - Title" pattern
+        let newArtist = null;
+        let newTitle = null;
+        
+        // Pattern 1: "Artist - Title"
+        if (cleanFilename.includes(' - ')) {
+          const parts = cleanFilename.split(' - ');
+          newArtist = parts[0].trim();
+          newTitle = parts.slice(1).join(' - ').trim(); // Handle multiple dashes in title
+        }
+        // Pattern 2: "Artist — Title" (em dash)
+        else if (cleanFilename.includes(' — ')) {
+          const parts = cleanFilename.split(' — ');
+          newArtist = parts[0].trim();
+          newTitle = parts.slice(1).join(' — ').trim();
+        }
+        // Pattern 3: Just use filename as title, leave artist
+        else {
+          newTitle = cleanFilename;
+        }
+        
+        // Clean up extra whitespace
+        if (newArtist) newArtist = newArtist.replace(/\s+/g, ' ').trim();
+        if (newTitle) newTitle = newTitle.replace(/\s+/g, ' ').trim();
+        
+        // Skip if we didn't parse anything useful
+        if (!newTitle && !newArtist) {
+          results.skipped.push({ id: song.id, title: song.title, reason: 'Could not parse filename' });
+          continue;
+        }
+        
+        // Only update if we found new data
+        const updates = [];
+        const params = [];
+        let paramCount = 0;
+        
+        if (newArtist && (song.artist === 'Unknown Artist' || !song.artist)) {
+          paramCount++;
+          updates.push(`artist = $${paramCount}`);
+          params.push(newArtist);
+        }
+        
+        if (newTitle && newTitle !== song.title) {
+          paramCount++;
+          updates.push(`title = $${paramCount}`);
+          params.push(newTitle);
+        }
+        
+        if (updates.length === 0) {
+          results.skipped.push({ id: song.id, title: song.title, reason: 'No changes needed' });
+          continue;
+        }
+        
+        // Update the song
+        paramCount++;
+        params.push(song.id);
+        
+        await query(
+          `UPDATE songs SET ${updates.join(', ')} WHERE id = $${paramCount}`,
+          params
+        );
+        
+        results.updated.push({
+          id: song.id,
+          oldTitle: song.title,
+          oldArtist: song.artist,
+          newTitle: newTitle || song.title,
+          newArtist: newArtist || song.artist
+        });
+        
+      } catch (err) {
+        results.failed.push({ id: song.id, title: song.title, error: err.message });
+      }
+    }
+
+    res.json({
+      message: `Processed ${songsResult.rows.length} songs`,
+      ...results
+    });
+
+  } catch (error) {
+    console.error('Bulk parse filename error:', error);
+    res.status(500).json({ error: 'Failed to parse filenames' });
+  }
+});
+
+/**
  * POST /api/library/bulk/fetch-artwork
  * Re-fetch iTunes artwork for multiple songs
  * NOTE: This route MUST come before /:id/fetch-artwork to avoid "bulk" being matched as an ID
